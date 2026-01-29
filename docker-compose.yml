@@ -1,0 +1,25 @@
+services:
+  sonarqube-viewer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sonarqube-issues-viewer
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      - NODE_ENV=production
+      - NEXT_TELEMETRY_DISABLED=1
+    restart: unless-stopped
+    networks:
+      - sonarqube-network
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  sonarqube-network:
+    driver: bridge
+
