@@ -7,7 +7,8 @@ import { Button } from '@/components/ui/button'
 interface SearchPanelProps {
   onSearch: (params: {
     apiUrl: string
-    componentKeys: string
+    componentKeys?: string
+    projectKey?: string
     token?: string
   }) => void
   loading?: boolean
@@ -16,33 +17,41 @@ interface SearchPanelProps {
 const STORAGE_KEYS = {
   apiUrl: 'sonarqube-apiUrl',
   componentKeys: 'sonarqube-componentKeys',
+  projectKey: 'sonarqube-projectKey',
+  token: 'sonarqube-token',
 }
 
 const DEFAULT_VALUES = {
   apiUrl: 'http://localhost:9004',
-  componentKeys: 'gbsp-p',
+  componentKeys: 'gbsp-rb',
+  projectKey: 'gbsp-rb',
   token: '',
 }
 
 export default function SearchPanel({ onSearch, loading = false }: SearchPanelProps) {
-  // Load saved values from localStorage on mount
-  const [apiUrl, setApiUrl] = useState(() => {
+  // Initialize with default values to avoid hydration mismatch
+  // Then update from localStorage after mount
+  const [apiUrl, setApiUrl] = useState(DEFAULT_VALUES.apiUrl)
+  const [componentKeys, setComponentKeys] = useState(DEFAULT_VALUES.componentKeys)
+  const [projectKey, setProjectKey] = useState(DEFAULT_VALUES.projectKey)
+  const [token, setToken] = useState(DEFAULT_VALUES.token)
+  const [mounted, setMounted] = useState(false)
+
+  // Load from localStorage after mount to avoid hydration issues
+  useEffect(() => {
+    setMounted(true)
     if (typeof window !== 'undefined') {
-      return localStorage.getItem(STORAGE_KEYS.apiUrl) || DEFAULT_VALUES.apiUrl
+      const savedApiUrl = localStorage.getItem(STORAGE_KEYS.apiUrl)
+      const savedComponentKeys = localStorage.getItem(STORAGE_KEYS.componentKeys)
+      const savedProjectKey = localStorage.getItem(STORAGE_KEYS.projectKey)
+      const savedToken = localStorage.getItem(STORAGE_KEYS.token)
+      
+      if (savedApiUrl) setApiUrl(savedApiUrl)
+      if (savedComponentKeys) setComponentKeys(savedComponentKeys)
+      if (savedProjectKey) setProjectKey(savedProjectKey)
+      if (savedToken) setToken(savedToken)
     }
-    return DEFAULT_VALUES.apiUrl
-  })
-  
-  const [componentKeys, setComponentKeys] = useState(() => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem(STORAGE_KEYS.componentKeys) || DEFAULT_VALUES.componentKeys
-    }
-    return DEFAULT_VALUES.componentKeys
-  })
-  
-  const [token, setToken] = useState(() => {
-    return DEFAULT_VALUES.token
-  })
+  }, [])
 
   // Save to localStorage whenever values change
   useEffect(() => {
@@ -57,15 +66,43 @@ export default function SearchPanel({ onSearch, loading = false }: SearchPanelPr
     }
   }, [componentKeys])
 
-  // Intentionally do NOT persist token to localStorage (secrets should not be stored in web storage).
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(STORAGE_KEYS.projectKey, projectKey)
+    }
+  }, [projectKey])
+
+  // Save token to localStorage when it changes
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      if (token.trim()) {
+        localStorage.setItem(STORAGE_KEYS.token, token)
+      } else {
+        // Remove token from localStorage if cleared
+        localStorage.removeItem(STORAGE_KEYS.token)
+      }
+    }
+  }, [token])
+
+  // Function to clear token
+  const clearToken = () => {
+    setToken('')
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem(STORAGE_KEYS.token)
+    }
+  }
 
   const handleSearch = (e?: React.FormEvent) => {
     e?.preventDefault()
     const trimmedApiUrl = apiUrl.trim()
-    const trimmedComponentKeys = componentKeys.trim()
     
-    if (!trimmedApiUrl || !trimmedComponentKeys) {
-      console.warn('Missing required fields:', { apiUrl: trimmedApiUrl, componentKeys: trimmedComponentKeys })
+    if (!trimmedApiUrl) {
+      console.warn('Missing required fields: apiUrl')
+      return
+    }
+
+    if (!componentKeys.trim() && !projectKey.trim()) {
+      console.warn('Missing required fields: componentKeys or projectKey')
       return
     }
     
@@ -74,18 +111,25 @@ export default function SearchPanel({ onSearch, loading = false }: SearchPanelPr
     
     if (typeof window !== 'undefined') {
       localStorage.setItem(STORAGE_KEYS.apiUrl, trimmedApiUrl)
-      localStorage.setItem(STORAGE_KEYS.componentKeys, trimmedComponentKeys)
+      localStorage.setItem(STORAGE_KEYS.componentKeys, componentKeys.trim())
+      localStorage.setItem(STORAGE_KEYS.projectKey, projectKey.trim())
+      // Token is already saved via useEffect, but ensure it's saved here too
+      if (trimmedToken) {
+        localStorage.setItem(STORAGE_KEYS.token, trimmedToken)
+      }
     }
     
     console.log('SearchPanel submitting:', {
       apiUrl: trimmedApiUrl,
-      componentKeys: trimmedComponentKeys,
+      componentKeys: componentKeys.trim() || undefined,
+      projectKey: projectKey.trim() || undefined,
       hasToken: !!trimmedToken
     })
     
     onSearch({
       apiUrl: trimmedApiUrl,
-      componentKeys: trimmedComponentKeys,
+      componentKeys: componentKeys.trim() || undefined,
+      projectKey: projectKey.trim() || undefined,
       token: trimmedToken,
     })
   }
@@ -96,15 +140,39 @@ export default function SearchPanel({ onSearch, loading = false }: SearchPanelPr
     }
   }
 
-  // Build API URL in real-time
-  const buildApiUrl = () => {
+  // Build API URLs in real-time
+  const buildApiUrls = () => {
     let base = apiUrl.trim() || 'http://localhost:9004'
     if (!base.startsWith('http://') && !base.startsWith('https://')) {
       base = `http://${base}`
     }
     base = base.replace(/\/$/, '')
-    const keys = componentKeys.trim() || 'gbsp-p'
-    return `${base}/api/issues/search?componentKeys=${encodeURIComponent(keys)}`
+    
+    const urls: string[] = []
+    
+    if (componentKeys?.trim()) {
+      urls.push(`${base}/api/issues/search?componentKeys=${encodeURIComponent(componentKeys.trim())}`)
+    }
+    
+    if (projectKey?.trim()) {
+      urls.push(`${base}/api/hotspots/search?projectKey=${encodeURIComponent(projectKey.trim())}`)
+    }
+    
+    return urls
+  }
+  
+  // Compute button text in a way that's consistent between server and client
+  const getButtonText = () => {
+    if (loading) return 'Fetching...'
+    // During SSR (when not mounted), use default values to ensure consistency
+    const currentComponentKeys = mounted ? componentKeys : DEFAULT_VALUES.componentKeys
+    const currentProjectKey = mounted ? projectKey : DEFAULT_VALUES.projectKey
+    const hasComponentKeys = currentComponentKeys?.trim() || false
+    const hasProjectKey = currentProjectKey?.trim() || false
+    if (hasComponentKeys && hasProjectKey) return 'Fetch Both'
+    if (hasComponentKeys) return 'Fetch Issues'
+    if (hasProjectKey) return 'Fetch Hotspots'
+    return 'Fetch'
   }
 
   return (
@@ -134,7 +202,7 @@ export default function SearchPanel({ onSearch, loading = false }: SearchPanelPr
 
             <div>
               <label className="text-sm font-medium mb-2 block">
-                Component Keys
+                Component Keys (for Issues)
               </label>
               <input
                 type="text"
@@ -142,10 +210,27 @@ export default function SearchPanel({ onSearch, loading = false }: SearchPanelPr
                 onChange={(e) => setComponentKeys(e.target.value)}
                 onKeyPress={handleKeyPress}
                 className="w-full h-10 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                placeholder="gbsp-p"
+                placeholder="gbsp-rb"
               />
               <p className="text-xs text-muted-foreground mt-1">
-                Component key(s) to search for
+                Component key(s) for fetching issues
+              </p>
+            </div>
+
+            <div>
+              <label className="text-sm font-medium mb-2 block">
+                Project Key (for Hotspots)
+              </label>
+              <input
+                type="text"
+                value={projectKey}
+                onChange={(e) => setProjectKey(e.target.value)}
+                onKeyPress={handleKeyPress}
+                className="w-full h-10 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                placeholder="gbsp-rb"
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                Project key for fetching security hotspots
               </p>
             </div>
 
@@ -153,27 +238,45 @@ export default function SearchPanel({ onSearch, loading = false }: SearchPanelPr
               <label className="text-sm font-medium mb-2 block">
                 Token (Optional)
               </label>
-              <input
-                type="password"
-                value={token}
-                onChange={(e) => setToken(e.target.value)}
-                onKeyPress={handleKeyPress}
-                className="w-full h-10 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                placeholder="Enter SonarQube token if required"
-              />
+              <div className="flex gap-2">
+                <input
+                  type="password"
+                  value={token}
+                  onChange={(e) => setToken(e.target.value)}
+                  onKeyPress={handleKeyPress}
+                  className="flex-1 h-10 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                  placeholder="Enter SonarQube token if required"
+                />
+                {token && (
+                  <Button
+                    type="button"
+                    onClick={clearToken}
+                    variant="outline"
+                    size="sm"
+                    className="h-10 px-4"
+                    title="Clear token"
+                  >
+                    Clear
+                  </Button>
+                )}
+              </div>
               <p className="text-xs text-muted-foreground mt-1">
-                SonarQube token (optional - only needed if API requires authentication)
+                SonarQube token (optional - only needed if API requires authentication). Token is saved locally and can be cleared anytime.
               </p>
             </div>
 
             <div className="md:col-span-2">
               <Button
                 type="submit"
-                disabled={loading || !apiUrl.trim() || !componentKeys.trim()}
+                disabled={
+                  loading || 
+                  !apiUrl.trim() || 
+                  (!componentKeys?.trim() && !projectKey?.trim())
+                }
                 className="w-full"
                 size="lg"
               >
-                {loading ? 'Fetching...' : 'Fetch Issues'}
+                {getButtonText()}
               </Button>
             </div>
           </div>
@@ -181,11 +284,18 @@ export default function SearchPanel({ onSearch, loading = false }: SearchPanelPr
 
         <div className="mt-4 p-3 bg-muted rounded-md border border-gray-200">
           <p className="text-xs font-medium text-gray-700 mb-2">
-            API Request URL:
+            API Request URL{buildApiUrls().length > 1 ? 's' : ''}:
           </p>
-          <code className="text-xs break-all text-gray-800 bg-white px-2 py-1.5 rounded border border-gray-300 block">
-            {buildApiUrl()}
-          </code>
+          {buildApiUrls().map((url, index) => (
+            <code key={index} className="text-xs break-all text-gray-800 bg-white px-2 py-1.5 rounded border border-gray-300 block mt-2 first:mt-0">
+              {url}
+            </code>
+          ))}
+          {buildApiUrls().length === 0 && (
+            <code className="text-xs text-gray-500 block">
+              Enter component keys or project key
+            </code>
+          )}
         </div>
       </CardContent>
     </Card>

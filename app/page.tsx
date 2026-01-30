@@ -2,12 +2,16 @@
 
 import { useState, useCallback } from 'react'
 import IssuesTable from '@/components/IssuesTable'
+import SecurityHotspotsTable from '@/components/SecurityHotspotsTable'
 import IssuesSummary from '@/components/IssuesSummary'
 import IssuesCharts from '@/components/IssuesCharts'
+import SecurityHotspotsSummary from '@/components/SecurityHotspotsSummary'
+import SecurityHotspotsCharts from '@/components/SecurityHotspotsCharts'
 import SearchPanel from '@/components/SearchPanel'
 import LoadingSpinner from '@/components/LoadingSpinner'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { fetchHotspotsAction } from '@/actions/hotspots.action'
 
 interface SonarQubeResponse {
   total: number
@@ -91,24 +95,81 @@ interface Component {
   path: string
 }
 
+interface SecurityHotspot {
+  key: string
+  component: string
+  project: string
+  securityCategory: string
+  vulnerabilityProbability: string
+  status: string
+  line: number
+  message: string
+  author: string
+  creationDate: string
+  updateDate: string
+  ruleKey: string
+  textRange?: {
+    startLine: number
+    endLine: number
+    startOffset: number
+    endOffset: number
+  }
+  flows?: Array<{
+    locations: Array<{
+      component: string
+      textRange: {
+        startLine: number
+        endLine: number
+        startOffset: number
+        endOffset: number
+      }
+      msg?: string
+    }>
+  }>
+}
+
+interface SecurityHotspotsResponse {
+  paging: {
+    pageIndex: number
+    pageSize: number
+    total: number
+  }
+  hotspots: SecurityHotspot[]
+}
+
 export default function Home() {
   const [data, setData] = useState<SonarQubeResponse | null>(null)
+  const [hotspotsData, setHotspotsData] = useState<SecurityHotspotsResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [issuesError, setIssuesError] = useState<string | null>(null)
+  const [hotspotsError, setHotspotsError] = useState<string | null>(null)
+
+  // Helper function to check if an error is a connection error
+  const isConnectionError = (errorMsg: string | null): boolean => {
+    if (!errorMsg) return false
+    const msg = errorMsg.toLowerCase()
+    return msg.includes('cannot connect') || 
+           msg.includes('econnrefused') || 
+           msg.includes('connection refused') ||
+           msg.includes('connect timeout') ||
+           msg.includes('server is running') ||
+           msg.includes('server is accessible')
+  }
   const [searchParams, setSearchParams] = useState<{
     apiUrl: string
-    componentKeys: string
+    componentKeys?: string
+    projectKey?: string
     token?: string
   } | null>(null)
 
-  // Simple fetch: just baseUrl + componentKeys using server action
+  // Fetch issues
   const fetchIssues = useCallback(async (
     apiUrl: string,
     componentKeys: string,
     token?: string
   ) => {
-    setLoading(true)
-    setError(null)
+    setIssuesError(null)
     
     try {
       // Normalize base URL
@@ -165,29 +226,139 @@ export default function Home() {
       
       setData(jsonData as SonarQubeResponse)
       console.log(`Successfully fetched ${(jsonData as SonarQubeResponse).issues?.length || 0} issues`)
+      return { success: true, type: 'issues' as const }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to fetch issues'
-      setError(errorMsg)
       console.error('Error fetching issues:', err)
-    } finally {
-      setLoading(false)
+      // Don't display connection errors
+      if (!isConnectionError(errorMsg)) {
+        setIssuesError(errorMsg)
+      } else {
+        setIssuesError(null)
+      }
+      return { success: false, error: errorMsg, type: 'issues' as const }
     }
   }, [])
 
-  const handleSearch = useCallback((params: {
+  // Fetch security hotspots using server action (service -> action -> UI pattern)
+  const fetchHotspots = useCallback(async (
+    apiUrl: string,
+    projectKey: string,
+    token?: string
+  ) => {
+    setHotspotsError(null)
+    
+    try {
+      // Normalize base URL
+      let baseUrl = apiUrl.trim() || 'http://localhost:9004'
+      
+      // Ensure it has protocol
+      if (!baseUrl.startsWith('http://') && !baseUrl.startsWith('https://')) {
+        baseUrl = `http://${baseUrl}`
+      }
+      
+      // Remove trailing slash
+      baseUrl = baseUrl.replace(/\/$/, '')
+      
+      // Trim projectKey to handle any whitespace
+      const trimmedProjectKey = projectKey.trim()
+      
+      if (!trimmedProjectKey) {
+        throw new Error('Project key cannot be empty')
+      }
+      
+      // Use server action (service -> action -> UI pattern)
+      const result = await fetchHotspotsAction(
+        baseUrl,
+        trimmedProjectKey,
+        token?.trim() || undefined
+      )
+      
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to fetch security hotspots')
+      }
+
+      const jsonData = result.data as SecurityHotspotsResponse
+      
+      // Validate response structure
+      if (!jsonData || typeof jsonData !== 'object') {
+        throw new Error('Invalid response format from API')
+      }
+      
+      setHotspotsData(jsonData)
+      console.log(`Successfully fetched ${jsonData.hotspots?.length || 0} security hotspots`)
+      return { success: true, type: 'hotspots' as const }
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Failed to fetch security hotspots'
+      console.error('Error fetching security hotspots:', err)
+      // Don't display connection errors
+      if (!isConnectionError(errorMsg)) {
+        setHotspotsError(errorMsg)
+      } else {
+        setHotspotsError(null)
+      }
+      return { success: false, error: errorMsg, type: 'hotspots' as const }
+    }
+  }, [])
+
+  const handleSearch = useCallback(async (params: {
     apiUrl: string
-    componentKeys: string
+    componentKeys?: string
+    projectKey?: string
     token?: string
   }) => {
-    setSearchParams({
-      apiUrl: params.apiUrl,
-      componentKeys: params.componentKeys,
-      token: params.token,
+    setSearchParams(params)
+    setLoading(true)
+    setError(null)
+    setIssuesError(null)
+    setHotspotsError(null)
+    
+    const promises: Promise<any>[] = []
+    
+    if (params.componentKeys) {
+      promises.push(fetchIssues(params.apiUrl, params.componentKeys, params.token))
+    }
+    
+    if (params.projectKey) {
+      promises.push(fetchHotspots(params.apiUrl, params.projectKey, params.token))
+    }
+    
+    if (promises.length === 0) {
+      setLoading(false)
+      return
+    }
+    
+    const results = await Promise.allSettled(promises)
+    
+    // Check for errors - but allow partial success
+    // Filter out connection errors from being displayed
+    const errors: string[] = []
+    results.forEach((result) => {
+      if (result.status === 'rejected') {
+        errors.push('Unknown error occurred')
+      } else if (result.value && !result.value.success) {
+        const errorValue = result.value as { success: false; error?: string; type?: string }
+        const errorMsg = errorValue.error || 'Unknown error'
+        // Skip connection errors
+        if (!isConnectionError(errorMsg)) {
+          const typeLabel = errorValue.type === 'issues' ? 'Issues' : 'Hotspots'
+          errors.push(`${typeLabel}: ${errorMsg}`)
+        }
+      }
     })
-    fetchIssues(params.apiUrl, params.componentKeys, params.token)
-  }, [fetchIssues])
+    
+    // Only set general error if all requests failed (and errors are not connection errors)
+    if (errors.length > 0 && errors.length === promises.length) {
+      setError(errors.join('; '))
+    } else {
+      // Clear error state if all errors were connection errors
+      setError(null)
+    }
+    
+    setLoading(false)
+  }, [fetchIssues, fetchHotspots])
 
-  if (loading && !data && !error) {
+  if (loading && !data && !hotspotsData && !error) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <LoadingSpinner />
@@ -209,25 +380,37 @@ export default function Home() {
 
         <SearchPanel onSearch={handleSearch} loading={loading} />
 
-        {error && (
+        {error && !isConnectionError(error) && (
           <Card className="mb-6 border-destructive">
             <CardHeader>
               <CardTitle className="text-destructive">Error</CardTitle>
             </CardHeader>
             <CardContent>
-              <p className="mb-4">{error}</p>
+              <p className="mb-4 font-medium whitespace-pre-line">{error}</p>
               <div className="bg-muted p-4 rounded-md mb-4">
                 <p className="text-sm font-semibold mb-2">Troubleshooting:</p>
                 <ul className="text-sm list-disc list-inside space-y-1">
-                  <li>Make sure the API URL is correct (e.g., http://localhost:9004)</li>
-                  <li>Verify that your SonarQube server is running and accessible</li>
-                  <li>Check that the project key is correct</li>
+                  {error.includes('401') || error.includes('Authentication') ? (
+                    <>
+                      <li className="font-semibold text-red-600">This error indicates authentication is required</li>
+                      <li>Enter your SonarQube token in the "Token (Optional)" field</li>
+                      <li>To get a token: SonarQube → My Account → Security → Generate Token</li>
+                      <li>Make sure the token has the necessary permissions to access the project</li>
+                    </>
+                  ) : (
+                    <>
+                      <li>Make sure the API URL is correct (e.g., http://10.0.156.139:9004)</li>
+                      <li>Verify that your SonarQube server is running and accessible</li>
+                      <li>Check that the project/component keys are correct</li>
+                      <li>If authentication is required, enter your SonarQube token</li>
+                    </>
+                  )}
                 </ul>
               </div>
               <Button 
                 onClick={() => {
                   if (searchParams) {
-                    fetchIssues(searchParams.apiUrl, searchParams.componentKeys, searchParams.token)
+                    handleSearch(searchParams)
                   }
                 }} 
                 variant="destructive"
@@ -238,7 +421,30 @@ export default function Home() {
           </Card>
         )}
 
-        {data && (
+        {issuesError && searchParams && !isConnectionError(issuesError) && (
+          <Card className="mb-6 border-orange-500">
+            <CardHeader>
+              <CardTitle className="text-orange-600">Issues Fetch Error</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="mb-2 text-sm whitespace-pre-line">{issuesError}</p>
+              <Button 
+                onClick={() => {
+                  if (searchParams && searchParams.componentKeys) {
+                    fetchIssues(searchParams.apiUrl, searchParams.componentKeys, searchParams.token)
+                  }
+                }} 
+                variant="outline"
+                size="sm"
+              >
+                Retry Issues
+              </Button>
+            </CardContent>
+          </Card>
+        )}
+
+
+        {data && searchParams && (
           <>
             <IssuesSummary data={data} />
             
@@ -246,7 +452,7 @@ export default function Home() {
           </>
         )}
 
-        {data && (
+        {data && searchParams && (
           <Card className="mt-8">
             <CardHeader className="border-b bg-gradient-to-r from-gray-50 to-white">
               <div className="flex items-center justify-between">
@@ -265,6 +471,57 @@ export default function Home() {
             </CardContent>
           </Card>
         )}
+
+        {hotspotsError && searchParams && !isConnectionError(hotspotsError) && (
+          <Card className="mb-6 border-orange-500">
+            <CardHeader>
+              <CardTitle className="text-orange-600">Security Hotspots Fetch Error</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="mb-2 text-sm whitespace-pre-line">{hotspotsError}</p>
+              <Button 
+                onClick={() => {
+                  if (searchParams && searchParams.projectKey) {
+                    fetchHotspots(searchParams.apiUrl, searchParams.projectKey, searchParams.token)
+                  }
+                }} 
+                variant="outline"
+                size="sm"
+              >
+                Retry Hotspots
+              </Button>
+            </CardContent>
+          </Card>
+        )}
+
+        {hotspotsData && searchParams && (
+          <>
+            <SecurityHotspotsSummary data={hotspotsData} />
+            
+            <SecurityHotspotsCharts data={hotspotsData} />
+          </>
+        )}
+
+        {hotspotsData && searchParams && (
+          <Card className="mt-8">
+            <CardHeader className="border-b bg-gradient-to-r from-gray-50 to-white">
+              <div className="flex items-center justify-between">
+                <div>
+                  <CardTitle className="text-xl font-semibold text-gray-900">
+                    Security Hotspots
+                  </CardTitle>
+                  <p className="text-sm text-muted-foreground mt-1">
+                    {hotspotsData.hotspots.length} {hotspotsData.hotspots.length === 1 ? 'hotspot' : 'hotspots'} found
+                  </p>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="p-0">
+              <SecurityHotspotsTable hotspots={hotspotsData.hotspots} />
+            </CardContent>
+          </Card>
+        )}
+
       </div>
     </main>
   )
